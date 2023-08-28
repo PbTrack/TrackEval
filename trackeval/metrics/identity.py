@@ -13,7 +13,7 @@ class Identity(_BaseMetric):
         """Default class config values"""
         default_config = {
             'THRESHOLD': 0.5,  # Similarity score threshold required for a IDTP match. Default 0.5.
-            'PRINT_CONFIG': True,  # Whether to print the config information on init. Default: False.
+            'PRINT_CONFIG': False,  # Whether to print the config information on init. Default: False.
         }
         return default_config
 

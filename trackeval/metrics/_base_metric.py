@@ -4,6 +4,9 @@ from abc import ABC, abstractmethod
 from .. import _timing
 from ..utils import TrackEvalException
 
+import logging
+log = logging.getLogger(__name__)
+
 
 class _BaseMetric(ABC):
     @abstractmethod
@@ -65,7 +68,7 @@ class _BaseMetric(ABC):
 
     def print_table(self, table_res, tracker, cls):
         """Prints table of results for all sequences"""
-        print('')
+        log.info('')
         metric_name = self.get_name()
         self._row_print([metric_name + ': ' + tracker + '-' + cls] + self.summary_fields)
         for seq, results in sorted(table_res.items()):
@@ -97,7 +100,7 @@ class _BaseMetric(ABC):
         to_print = '%-35s' % argv[0]
         for v in argv[1:]:
             to_print += '%-10s' % str(v)
-        print(to_print)
+        log.info(to_print)
 
     def summary_results(self, table_res):
         """Returns a simple summary of final results for a tracker"""

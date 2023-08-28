@@ -14,6 +14,9 @@ try:
 except ImportError as _:
     TQDM_IMPORTED = False
 
+import logging
+log = logging.getLogger(__name__)
+
 
 class Evaluator:
     """Evaluator class for evaluating different metrics for different datasets"""
@@ -23,7 +26,7 @@ class Evaluator:
         """Returns the default config values for evaluation"""
         code_path = utils.get_code_path()
         default_config = {
-            'USE_PARALLEL': False,
+            'USE_PARALLEL': True,
             'NUM_PARALLEL_CORES': 8,
             'BREAK_ON_ERROR': True,  # Raises exception and exits with error
             'RETURN_ON_ERROR': False,  # if not BREAK_ON_ERROR, then returns from function on error
@@ -31,14 +34,14 @@ class Evaluator:
 
             'PRINT_RESULTS': True,
             'PRINT_ONLY_COMBINED': False,
-            'PRINT_CONFIG': True,
-            'TIME_PROGRESS': True,
+            'PRINT_CONFIG': False,
+            'TIME_PROGRESS': False,
             'DISPLAY_LESS_PROGRESS': True,
 
             'OUTPUT_SUMMARY': True,
             'OUTPUT_EMPTY_CLASSES': True,  # If False, summary files are not output for classes with no detections
             'OUTPUT_DETAILED': True,
-            'PLOT_CURVES': True,
+            'PLOT_CURVES': False,
         }
         return default_config
 
@@ -66,7 +69,7 @@ class Evaluator:
             output_res[dataset_name] = {}
             output_msg[dataset_name] = {}
             tracker_list, seq_list, class_list = dataset.get_eval_info()
-            print('\nEvaluating %i tracker(s) on %i sequence(s) for %i class(es) on %s dataset using the following '
+            log.info('\nEvaluating %i tracker(s) on %i sequence(s) for %i class(es) on %s dataset using the following '
                   'metrics: %s\n' % (len(tracker_list), len(seq_list), len(class_list), dataset_name,
                                      ', '.join(metric_names)))
 
@@ -77,7 +80,7 @@ class Evaluator:
                     # Evaluate each sequence in parallel or in series.
                     # returns a nested dict (res), indexed like: res[seq][class][metric_name][sub_metric field]
                     # e.g. res[seq_0001][pedestrian][hota][DetA]
-                    print('\nEvaluating %s\n' % tracker)
+                    log.info('\nEvaluating %s\n' % tracker)
                     time_start = time.time()
                     if config['USE_PARALLEL']:
                         if show_progressbar and TQDM_IMPORTED:
@@ -149,7 +152,7 @@ class Evaluator:
 
                     # Print and output results in various formats
                     if config['TIME_PROGRESS']:
-                        print('\nAll sequences for %s finished in %.2f seconds' % (tracker, time.time() - time_start))
+                        log.info('\nAll sequences for %s finished in %.2f seconds' % (tracker, time.time() - time_start))
                     output_fol = dataset.get_output_fol(tracker)
                     tracker_display_name = dataset.get_display_name(tracker)
                     for c_cls in res['COMBINED_SEQ'].keys():  # class_list + combined classes if calculated
@@ -194,8 +197,8 @@ class Evaluator:
                         output_msg[dataset_name][tracker] = str(err)
                     else:
                         output_msg[dataset_name][tracker] = 'Unknown error occurred.'
-                    print('Tracker %s was unable to be evaluated.' % tracker)
-                    print(err)
+                    log.error('Tracker %s was unable to be evaluated.' % tracker)
+                    log.error(err)
                     traceback.print_exc()
                     if config['LOG_ON_ERROR'] is not None:
                         with open(config['LOG_ON_ERROR'], 'a') as f:
