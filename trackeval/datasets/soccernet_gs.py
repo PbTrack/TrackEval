@@ -1,13 +1,13 @@
+import json
 import os
 import csv
 import configparser
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+import random
 from ._base_dataset import _BaseDataset
 from .. import utils
 from .. import _timing
 from ..utils import TrackEvalException
-
 
 class SoccerNetGS(_BaseDataset):
     """Dataset class for the SoccerNet Challenge Game State (GS) task"""
@@ -17,12 +17,12 @@ class SoccerNetGS(_BaseDataset):
         """Default class config values"""
         code_path = utils.get_code_path()
         default_config = {
-            'GT_FOLDER': os.path.join(code_path, 'data/gt/mot_challenge/'),  # Location of GT data
-            'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/mot_challenge/'),  # Trackers location
+            'GT_FOLDER': os.path.join(code_path, 'data/SoccerNetGS/val'),  # Location of GT data
+            'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/SoccerNetGS/'),  # Trackers location
             'OUTPUT_FOLDER': None,  # Where to save eval results (if None, same as TRACKERS_FOLDER)
             'TRACKERS_TO_EVAL': None,  # Filenames of trackers to eval (if None, all in folder)
-            'CLASSES_TO_EVAL': [category["name"] for category in val_classes],  # FIXME not used
-            'SPLIT_TO_EVAL': 'train',  # Valid: 'train', 'test', 'all'
+            'CLASSES_TO_EVAL': [category["name"] for category in sn_classes],  # FIXME not used
+            'SPLIT_TO_EVAL': 'val',  # Valid: 'train', 'val', 'test', 'challenge'
             'INPUT_AS_ZIP': False,  # Whether tracker input files are zipped
             'PRINT_CONFIG': True,  # Whether to print current config
             'DO_PREPROC': True,  # Whether to perform preprocessing (never done for MOT15)
@@ -32,7 +32,7 @@ class SoccerNetGS(_BaseDataset):
             'SEQMAP_FOLDER': None,  # Where seqmaps are found (if None, GT_FOLDER/seqmaps)
             'SEQMAP_FILE': None,  # Directly specify seqmap file (if none use seqmap_folder/benchmark-split_to_eval)
             'SEQ_INFO': None,  # If not None, directly specify sequences to eval and their number of timesteps
-            'GT_LOC_FORMAT': '{gt_folder}/{seq}/gt/gt.txt',  # '{gt_folder}/{seq}/gt/gt.txt'
+            'GT_LOC_FORMAT': '{gt_folder}/{seq}/Labels-GameState.json',  # '{gt_folder}/{seq}/gt/gt.json'
             'SKIP_SPLIT_FOL': False,  # If False, data is in GT_FOLDER/BENCHMARK-SPLIT_TO_EVAL/ and in
                                       # TRACKERS_FOLDER/BENCHMARK-SPLIT_TO_EVAL/tracker/
                                       # If True, then the middle 'benchmark-split' folder is skipped for both.
@@ -45,7 +45,7 @@ class SoccerNetGS(_BaseDataset):
         # Fill non-given config values with defaults
         self.config = utils.init_config(config, self.get_default_dataset_config(), self.get_name())
 
-        gt_set = self.get_name() + '-' + self.config['SPLIT_TO_EVAL']
+        gt_set = self.config['SPLIT_TO_EVAL']
         self.gt_set = gt_set
         if not self.config['SKIP_SPLIT_FOL']:
             split_fol = gt_set
@@ -58,6 +58,9 @@ class SoccerNetGS(_BaseDataset):
         self.use_super_categories = False  # TODO
         self.data_is_zipped = self.config['INPUT_AS_ZIP']
         self.do_preproc = self.config['DO_PREPROC']
+        self.all_classes = {}
+        self.class_counter = 1
+        self.class_names_to_ids = {category["name"]: category["id"] for category in sn_classes}
 
         self.output_fol = self.config['OUTPUT_FOLDER']
         if self.output_fol is None:
@@ -67,7 +70,7 @@ class SoccerNetGS(_BaseDataset):
         self.output_sub_fol = self.config['OUTPUT_SUB_FOLDER']
 
         # Get classes to eval
-        classes_to_id = {category["name"]: category["id"] for category in val_classes}
+        classes_to_id = {category["name"]: category["id"] for category in sn_classes}
         self.valid_classes = classes_to_id.keys()  # TODO remove ball
         self.class_list = classes_to_id.keys()
         self.class_name_to_class_id = classes_to_id
@@ -113,7 +116,7 @@ class SoccerNetGS(_BaseDataset):
                     raise TrackEvalException('Tracker file not found: ' + tracker + '/' + os.path.basename(curr_file))
             else:
                 for seq in self.seq_list:
-                    curr_file = os.path.join(self.tracker_fol, tracker, self.tracker_sub_fol, seq + '.txt')
+                    curr_file = os.path.join(self.tracker_fol, tracker, self.tracker_sub_fol, seq + '.json')
                     if not os.path.isfile(curr_file):
                         print('Tracker file not found: ' + curr_file)
                         raise TrackEvalException(
@@ -140,7 +143,7 @@ class SoccerNetGS(_BaseDataset):
                     ini_data.read(ini_file)
                     seq_lengths[seq] = int(ini_data['Sequence']['seqLength'])
 
-        else:
+        else:  # FIXME compute SEQ based on json
             if self.config["SEQMAP_FILE"]:
                 seqmap_file = self.config["SEQMAP_FILE"]
             else:
@@ -179,106 +182,117 @@ class SoccerNetGS(_BaseDataset):
         [tracker_dets]: list (for each timestep) of lists of detections.
         """
         # File location
-        if self.data_is_zipped:
-            if is_gt:
-                zip_file = os.path.join(self.gt_fol, 'data.zip')
-            else:
-                zip_file = os.path.join(self.tracker_fol, tracker, self.tracker_sub_fol + '.zip')
-            file = seq + '.txt'
-        else:
-            zip_file = None
-            if is_gt:
-                file = self.config["GT_LOC_FORMAT"].format(gt_folder=self.gt_fol, seq=seq)
-            else:
-                file = os.path.join(self.tracker_fol, tracker, self.tracker_sub_fol, seq + '.txt')
-
-        # Load raw data from text file
-        read_data, ignore_data = self._load_simple_text_file(file, is_zipped=self.data_is_zipped, zip_file=zip_file)
-
-        # Convert data to required format
-        num_timesteps = self.seq_lengths[seq]
-        data_keys = ['ids', 'classes', 'dets']
         if is_gt:
-            data_keys += ['gt_crowd_ignore_regions', 'gt_extras']
+            file = self.config["GT_LOC_FORMAT"].format(gt_folder=self.gt_fol, seq=seq)
         else:
-            data_keys += ['tracker_confidences']
-        raw_data = {key: [None] * num_timesteps for key in data_keys}
+            file = os.path.join(self.tracker_fol, tracker, self.tracker_sub_fol, seq + '.json')
 
-        # Check for any extra time keys
-        current_time_keys = [str( t+ 1) for t in range(num_timesteps)]
-        extra_time_keys = [x for x in read_data.keys() if x not in current_time_keys]
-        if len(extra_time_keys) > 0:
-            if is_gt:
-                text = 'Ground-truth'
-            else:
-                text = 'Tracking'
-            raise TrackEvalException(
-                text + ' data contains the following invalid timesteps in seq %s: ' % seq + ', '.join(
-                    [str(x) + ', ' for x in extra_time_keys]))
+        with open(file, 'r') as f:
+            data = json.load(f)
 
+        if is_gt:
+            self.categories = {categ['id']: categ for categ in data["categories"]}
+            self.images = data["images"]
+            # Create a dictionary mapping from image_id to timestep
+            self.image_id_to_timestep = {image["image_id"]: int(os.path.splitext(image["file_name"])[0]) - 1 for image in
+                                    data["images"]}
+
+        num_timesteps = len(self.images)  # FIXME what if unlabeled images?
+
+        # Initialize lists with None for each timestep
+        ids = [None] * num_timesteps
+        classes = [None] * num_timesteps
+        dets = [None] * num_timesteps
+        crowd_ignore_regions = [None] * num_timesteps
+        extras = [None] * num_timesteps
+        confidences = [None] * num_timesteps
+
+        # detections = data["annotations"] if is_gt else data["predictions"]
+        # for annotation in detections:  # FIXME
+        for annotation in data["annotations"]:  # TODO remove
+            if annotation["supercategory"] != "object":  # ignore pitch and camera
+                continue
+            role = annotation["attributes"]["role"]
+            jersey_number = annotation["attributes"]["jersey"]
+            team = annotation["attributes"]["team"]
+            class_name = attributes_to_class_name(role, team, jersey_number)
+            if class_name not in self.all_classes:
+                self.all_classes[class_name] = {
+                    "id": self.class_counter,
+                    "name": class_name,
+                    "supercategory": "object"
+                }
+                self.class_counter += 1
+        list(self.all_classes.values())
+
+        for annotation in data["annotations"]:
+            if annotation["supercategory"] != "object":  # ignore pitch and camera
+                continue
+            timestep = self.image_id_to_timestep[annotation["image_id"]]
+            if ids[timestep] is None:
+                ids[timestep] = []
+                classes[timestep] = []
+                dets[timestep] = []
+                crowd_ignore_regions[timestep] = []
+                extras[timestep] = []
+                confidences[timestep] = []
+
+            crowd_ignore_regions[timestep].append(np.empty((0, 4)))
+            bbox_image = annotation["bbox_image"]  # FIXME use bbox_pitch and turn into bbox
+            dets[timestep].append([bbox_image["x"], bbox_image["y"], bbox_image["w"], bbox_image["h"]])
+            ids[timestep].append(annotation["track_id"])
+
+            # confidence = annotation["confidence"] if not is_gt else 1
+            confidence = 0.8 if not is_gt else 1  # FIXME
+            confidences[timestep].append(confidence)
+
+            # Extract extra information if needed (modify this part based on your requirements)
+            role = annotation["attributes"]["role"]
+            jersey_number = annotation["attributes"]["jersey"]
+            team = annotation["attributes"]["team"]
+            category_id = annotation["category_id"]
+            extras[timestep].append({
+                "role": role,
+                "jersey": jersey_number,
+                "team": team,
+                "category_id": category_id,
+                # Add more fields as needed
+            })
+
+            class_name = attributes_to_class_name(role, team, jersey_number)
+            class_id = self.class_name_to_class_id[class_name]
+            # class_id = self.class_name_to_class_id[class_name] if class_name in self.class_name_to_class_id else -1
+            classes[timestep].append(class_id)
+            
+
+        # Convert lists to numpy arrays
         for t in range(num_timesteps):
-            time_key = str(t+1)
-            if time_key in read_data.keys():
-                try:
-                    time_data = np.asarray(read_data[time_key], dtype=float)
-                except ValueError:
-                    if is_gt:
-                        raise TrackEvalException(
-                            'Cannot convert gt data for sequence %s to float. Is data corrupted?' % seq)
-                    else:
-                        raise TrackEvalException(
-                            'Cannot convert tracking data from tracker %s, sequence %s to float. Is data corrupted?' % (
-                                tracker, seq))
-                try:
-                    raw_data['dets'][t] = np.atleast_2d(time_data[:, 2:6])
-                    raw_data['ids'][t] = np.atleast_1d(time_data[:, 1]).astype(int)
-                except IndexError:
-                    if is_gt:
-                        err = 'Cannot load gt data from sequence %s, because there is not enough ' \
-                              'columns in the data.' % seq
-                        raise TrackEvalException(err)
-                    else:
-                        err = 'Cannot load tracker data from tracker %s, sequence %s, because there is not enough ' \
-                              'columns in the data.' % (tracker, seq)
-                        raise TrackEvalException(err)
-                if time_data.shape[1] >= 8:
-                    raw_data['classes'][t] = np.atleast_1d(time_data[:, 7]).astype(int)
-                else:
-                    if not is_gt:
-                        raw_data['classes'][t] = np.ones_like(raw_data['ids'][t])
-                    else:
-                        raise TrackEvalException(
-                            'GT data is not in a valid format, there is not enough rows in seq %s, timestep %i.' % (
-                                seq, t))
-                if is_gt:
-                    gt_extras_dict = {'zero_marked': np.atleast_1d(time_data[:, 6].astype(int))}
-                    raw_data['gt_extras'][t] = gt_extras_dict
-                else:
-                    raw_data['tracker_confidences'][t] = np.atleast_1d(time_data[:, 6])
-            else:
-                raw_data['dets'][t] = np.empty((0, 4))
-                raw_data['ids'][t] = np.empty(0).astype(int)
-                raw_data['classes'][t] = np.empty(0).astype(int)
-                if is_gt:
-                    gt_extras_dict = {'zero_marked': np.empty(0)}
-                    raw_data['gt_extras'][t] = gt_extras_dict
-                else:
-                    raw_data['tracker_confidences'][t] = np.empty(0)
-            if is_gt:
-                raw_data['gt_crowd_ignore_regions'][t] = np.empty((0, 4))
+            if ids[t] is not None:
+                ids[t] = np.array(ids[t])
+                classes[t] = np.array(classes[t])
+                dets[t] = np.array(dets[t])
+                crowd_ignore_regions[t] = np.array(crowd_ignore_regions[t])
+                confidences[t] = np.array(confidences[t])
 
         if is_gt:
-            key_map = {'ids': 'gt_ids',
-                       'classes': 'gt_classes',
-                       'dets': 'gt_dets'}
+            raw_data = {
+                "gt_classes": [np.array(x) for x in classes],
+                "gt_crowd_ignore_regions": crowd_ignore_regions,
+                "gt_dets": dets,
+                "gt_extras": extras,
+                "gt_ids": [np.array(x) for x in ids],
+                "seq": seq,
+                "num_timesteps": num_timesteps,
+            }
         else:
-            key_map = {'ids': 'tracker_ids',
-                       'classes': 'tracker_classes',
-                       'dets': 'tracker_dets'}
-        for k, v in key_map.items():
-            raw_data[v] = raw_data.pop(k)
-        raw_data['num_timesteps'] = num_timesteps
-        raw_data['seq'] = seq
+            raw_data = {
+                "tracker_classes": [np.array(x) for x in classes],
+                "tracker_dets": dets,
+                "tracker_ids": [np.array(x) for x in ids],
+                "gt_extras": extras,
+                "tracker_confidences": [np.array(x) for x in confidences],
+            }
+            # raw_data = add_noise_to_data(raw_data, len(self.images))
         return raw_data
 
     @_timing.time
@@ -336,30 +350,8 @@ class SoccerNetGS(_BaseDataset):
             tracker_dets = raw_data['tracker_dets'][t][tracker_class_mask]
             similarity_scores = raw_data['similarity_scores'][t][gt_class_mask, :][:, tracker_class_mask]
 
-            # Match tracker and gt dets (with hungarian algorithm)
-            unmatched_indices = np.arange(tracker_ids.shape[0])
-            if gt_ids.shape[0] > 0 and tracker_ids.shape[0] > 0:
-                matching_scores = similarity_scores.copy()
-                matching_scores[matching_scores < 0.5 - np.finfo('float').eps] = 0
-                match_rows, match_cols = linear_sum_assignment(-matching_scores)
-                actually_matched_mask = matching_scores[match_rows, match_cols] > 0 + np.finfo('float').eps
-                match_cols = match_cols[actually_matched_mask]
-                unmatched_indices = np.delete(unmatched_indices, match_cols, axis=0)
-
-            # For unmatched tracker dets, remove those that are greater than 50% within a crowd ignore region.
-            unmatched_tracker_dets = tracker_dets[unmatched_indices, :]
-            crowd_ignore_regions = raw_data['gt_crowd_ignore_regions'][t]
-            intersection_with_ignore_region = self._calculate_box_ious(unmatched_tracker_dets, crowd_ignore_regions,
-                                                                       box_format='x0y0x1y1', do_ioa=True)
-            is_within_crowd_ignore_region = np.any(intersection_with_ignore_region > 0.5 + np.finfo('float').eps,
-                                                   axis=1)
-
-            # Apply preprocessing to remove unwanted tracker dets.
-            to_remove_tracker = unmatched_indices[is_within_crowd_ignore_region]
-            data['tracker_ids'][t] = np.delete(tracker_ids, to_remove_tracker, axis=0)
-            data['tracker_dets'][t] = np.delete(tracker_dets, to_remove_tracker, axis=0)
-            similarity_scores = np.delete(similarity_scores, to_remove_tracker, axis=1)
-
+            data['tracker_ids'][t] = tracker_ids
+            data['tracker_dets'][t] = tracker_dets
             data['gt_ids'][t] = gt_ids
             data['gt_dets'][t] = gt_dets
             data['similarity_scores'][t] = similarity_scores
@@ -401,978 +393,51 @@ class SoccerNetGS(_BaseDataset):
         similarity_scores = self._calculate_box_ious(gt_dets_t, tracker_dets_t, box_format='xywh')
         return similarity_scores
 
-train_classes = [
-  {
-    "id": 1,
-    "name": "ball_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 2,
-    "name": "ball_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 3,
-    "name": "ball_none",
-    "supercategory": "person"
-  },
-  {
-    "id": 4,
-    "name": "goalkeeper_left",
-    "supercategory": "person"
-  },
-  {
-    "id": 5,
-    "name": "goalkeeper_left_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 6,
-    "name": "goalkeeper_left_18",
-    "supercategory": "person"
-  },
-  {
-    "id": 7,
-    "name": "goalkeeper_right",
-    "supercategory": "person"
-  },
-  {
-    "id": 8,
-    "name": "goalkeeper_right_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 9,
-    "name": "goalkeeper_right_18",
-    "supercategory": "person"
-  },
-  {
-    "id": 10,
-    "name": "goalkeeper_right_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 11,
-    "name": "other_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 12,
-    "name": "other_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 13,
-    "name": "other_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 14,
-    "name": "player_left",
-    "supercategory": "person"
-  },
-  {
-    "id": 15,
-    "name": "player_left_10",
-    "supercategory": "person"
-  },
-  {
-    "id": 16,
-    "name": "player_left_11",
-    "supercategory": "person"
-  },
-  {
-    "id": 17,
-    "name": "player_left_13",
-    "supercategory": "person"
-  },
-  {
-    "id": 18,
-    "name": "player_left_14",
-    "supercategory": "person"
-  },
-  {
-    "id": 19,
-    "name": "player_left_15",
-    "supercategory": "person"
-  },
-  {
-    "id": 20,
-    "name": "player_left_16",
-    "supercategory": "person"
-  },
-  {
-    "id": 21,
-    "name": "player_left_17",
-    "supercategory": "person"
-  },
-  {
-    "id": 22,
-    "name": "player_left_20",
-    "supercategory": "person"
-  },
-  {
-    "id": 23,
-    "name": "player_left_21",
-    "supercategory": "person"
-  },
-  {
-    "id": 24,
-    "name": "player_left_22",
-    "supercategory": "person"
-  },
-  {
-    "id": 25,
-    "name": "player_left_23",
-    "supercategory": "person"
-  },
-  {
-    "id": 26,
-    "name": "player_left_24",
-    "supercategory": "person"
-  },
-  {
-    "id": 27,
-    "name": "player_left_25",
-    "supercategory": "person"
-  },
-  {
-    "id": 28,
-    "name": "player_left_26",
-    "supercategory": "person"
-  },
-  {
-    "id": 29,
-    "name": "player_left_27",
-    "supercategory": "person"
-  },
-  {
-    "id": 30,
-    "name": "player_left_28",
-    "supercategory": "person"
-  },
-  {
-    "id": 31,
-    "name": "player_left_29",
-    "supercategory": "person"
-  },
-  {
-    "id": 32,
-    "name": "player_left_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 33,
-    "name": "player_left_30",
-    "supercategory": "person"
-  },
-  {
-    "id": 34,
-    "name": "player_left_31",
-    "supercategory": "person"
-  },
-  {
-    "id": 35,
-    "name": "player_left_32",
-    "supercategory": "person"
-  },
-  {
-    "id": 36,
-    "name": "player_left_33",
-    "supercategory": "person"
-  },
-  {
-    "id": 37,
-    "name": "player_left_34",
-    "supercategory": "person"
-  },
-  {
-    "id": 38,
-    "name": "player_left_35",
-    "supercategory": "person"
-  },
-  {
-    "id": 39,
-    "name": "player_left_36",
-    "supercategory": "person"
-  },
-  {
-    "id": 40,
-    "name": "player_left_4",
-    "supercategory": "person"
-  },
-  {
-    "id": 41,
-    "name": "player_left_40",
-    "supercategory": "person"
-  },
-  {
-    "id": 42,
-    "name": "player_left_44",
-    "supercategory": "person"
-  },
-  {
-    "id": 43,
-    "name": "player_left_5",
-    "supercategory": "person"
-  },
-  {
-    "id": 44,
-    "name": "player_left_50",
-    "supercategory": "person"
-  },
-  {
-    "id": 45,
-    "name": "player_left_55",
-    "supercategory": "person"
-  },
-  {
-    "id": 46,
-    "name": "player_left_56",
-    "supercategory": "person"
-  },
-  {
-    "id": 47,
-    "name": "player_left_6",
-    "supercategory": "person"
-  },
-  {
-    "id": 48,
-    "name": "player_left_62",
-    "supercategory": "person"
-  },
-  {
-    "id": 49,
-    "name": "player_left_7",
-    "supercategory": "person"
-  },
-  {
-    "id": 50,
-    "name": "player_left_8",
-    "supercategory": "person"
-  },
-  {
-    "id": 51,
-    "name": "player_left_9",
-    "supercategory": "person"
-  },
-  {
-    "id": 52,
-    "name": "player_left_93",
-    "supercategory": "person"
-  },
-  {
-    "id": 53,
-    "name": "player_right",
-    "supercategory": "person"
-  },
-  {
-    "id": 54,
-    "name": "player_right_10",
-    "supercategory": "person"
-  },
-  {
-    "id": 55,
-    "name": "player_right_11",
-    "supercategory": "person"
-  },
-  {
-    "id": 56,
-    "name": "player_right_14",
-    "supercategory": "person"
-  },
-  {
-    "id": 57,
-    "name": "player_right_15",
-    "supercategory": "person"
-  },
-  {
-    "id": 58,
-    "name": "player_right_16",
-    "supercategory": "person"
-  },
-  {
-    "id": 59,
-    "name": "player_right_17",
-    "supercategory": "person"
-  },
-  {
-    "id": 60,
-    "name": "player_right_19",
-    "supercategory": "person"
-  },
-  {
-    "id": 61,
-    "name": "player_right_20",
-    "supercategory": "person"
-  },
-  {
-    "id": 62,
-    "name": "player_right_21",
-    "supercategory": "person"
-  },
-  {
-    "id": 63,
-    "name": "player_right_22",
-    "supercategory": "person"
-  },
-  {
-    "id": 64,
-    "name": "player_right_23",
-    "supercategory": "person"
-  },
-  {
-    "id": 65,
-    "name": "player_right_24",
-    "supercategory": "person"
-  },
-  {
-    "id": 66,
-    "name": "player_right_25",
-    "supercategory": "person"
-  },
-  {
-    "id": 67,
-    "name": "player_right_26",
-    "supercategory": "person"
-  },
-  {
-    "id": 68,
-    "name": "player_right_27",
-    "supercategory": "person"
-  },
-  {
-    "id": 69,
-    "name": "player_right_28",
-    "supercategory": "person"
-  },
-  {
-    "id": 70,
-    "name": "player_right_29",
-    "supercategory": "person"
-  },
-  {
-    "id": 71,
-    "name": "player_right_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 72,
-    "name": "player_right_30",
-    "supercategory": "person"
-  },
-  {
-    "id": 73,
-    "name": "player_right_31",
-    "supercategory": "person"
-  },
-  {
-    "id": 74,
-    "name": "player_right_33",
-    "supercategory": "person"
-  },
-  {
-    "id": 75,
-    "name": "player_right_34",
-    "supercategory": "person"
-  },
-  {
-    "id": 76,
-    "name": "player_right_35",
-    "supercategory": "person"
-  },
-  {
-    "id": 77,
-    "name": "player_right_36",
-    "supercategory": "person"
-  },
-  {
-    "id": 78,
-    "name": "player_right_38",
-    "supercategory": "person"
-  },
-  {
-    "id": 79,
-    "name": "player_right_4",
-    "supercategory": "person"
-  },
-  {
-    "id": 80,
-    "name": "player_right_40",
-    "supercategory": "person"
-  },
-  {
-    "id": 81,
-    "name": "player_right_44",
-    "supercategory": "person"
-  },
-  {
-    "id": 82,
-    "name": "player_right_5",
-    "supercategory": "person"
-  },
-  {
-    "id": 83,
-    "name": "player_right_50",
-    "supercategory": "person"
-  },
-  {
-    "id": 84,
-    "name": "player_right_55",
-    "supercategory": "person"
-  },
-  {
-    "id": 85,
-    "name": "player_right_6",
-    "supercategory": "person"
-  },
-  {
-    "id": 86,
-    "name": "player_right_62",
-    "supercategory": "person"
-  },
-  {
-    "id": 87,
-    "name": "player_right_7",
-    "supercategory": "person"
-  },
-  {
-    "id": 88,
-    "name": "player_right_75",
-    "supercategory": "person"
-  },
-  {
-    "id": 89,
-    "name": "player_right_8",
-    "supercategory": "person"
-  },
-  {
-    "id": 90,
-    "name": "player_right_9",
-    "supercategory": "person"
-  },
-  {
-    "id": 91,
-    "name": "referee_main",
-    "supercategory": "person"
-  },
-  {
-    "id": 92,
-    "name": "referee_side_bottom",
-    "supercategory": "person"
-  },
-  {
-    "id": 93,
-    "name": "referee_side_top",
-    "supercategory": "person"
-  }
-]
 
-val_classes = [
-  {
-    "id": 1,
-    "name": "ball_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 2,
-    "name": "ball_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 3,
-    "name": "ball_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 4,
-    "name": "ball_none",
-    "supercategory": "person"
-  },
-  {
-    "id": 5,
-    "name": "goalkeeper_left",
-    "supercategory": "person"
-  },
-  {
-    "id": 6,
-    "name": "goalkeeper_left_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 7,
-    "name": "goalkeeper_left_25",
-    "supercategory": "person"
-  },
-  {
-    "id": 8,
-    "name": "goalkeeper_left_30",
-    "supercategory": "person"
-  },
-  {
-    "id": 9,
-    "name": "goalkeeper_left_32",
-    "supercategory": "person"
-  },
-  {
-    "id": 10,
-    "name": "goalkeeper_right",
-    "supercategory": "person"
-  },
-  {
-    "id": 11,
-    "name": "goalkeeper_right_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 12,
-    "name": "goalkeeper_right_18",
-    "supercategory": "person"
-  },
-  {
-    "id": 13,
-    "name": "goalkeeper_right_30",
-    "supercategory": "person"
-  },
-  {
-    "id": 14,
-    "name": "goalkeeper_right_32",
-    "supercategory": "person"
-  },
-  {
-    "id": 15,
-    "name": "other_1",
-    "supercategory": "person"
-  },
-  {
-    "id": 16,
-    "name": "other_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 17,
-    "name": "other_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 18,
-    "name": "other_4",
-    "supercategory": "person"
-  },
-  {
-    "id": 19,
-    "name": "player_left",
-    "supercategory": "person"
-  },
-  {
-    "id": 20,
-    "name": "player_left_10",
-    "supercategory": "person"
-  },
-  {
-    "id": 21,
-    "name": "player_left_11",
-    "supercategory": "person"
-  },
-  {
-    "id": 22,
-    "name": "player_left_12",
-    "supercategory": "person"
-  },
-  {
-    "id": 23,
-    "name": "player_left_14",
-    "supercategory": "person"
-  },
-  {
-    "id": 24,
-    "name": "player_left_15",
-    "supercategory": "person"
-  },
-  {
-    "id": 25,
-    "name": "player_left_16",
-    "supercategory": "person"
-  },
-  {
-    "id": 26,
-    "name": "player_left_17",
-    "supercategory": "person"
-  },
-  {
-    "id": 27,
-    "name": "player_left_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 28,
-    "name": "player_left_20",
-    "supercategory": "person"
-  },
-  {
-    "id": 29,
-    "name": "player_left_22",
-    "supercategory": "person"
-  },
-  {
-    "id": 30,
-    "name": "player_left_23",
-    "supercategory": "person"
-  },
-  {
-    "id": 31,
-    "name": "player_left_24",
-    "supercategory": "person"
-  },
-  {
-    "id": 32,
-    "name": "player_left_25",
-    "supercategory": "person"
-  },
-  {
-    "id": 33,
-    "name": "player_left_26",
-    "supercategory": "person"
-  },
-  {
-    "id": 34,
-    "name": "player_left_27",
-    "supercategory": "person"
-  },
-  {
-    "id": 35,
-    "name": "player_left_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 36,
-    "name": "player_left_30",
-    "supercategory": "person"
-  },
-  {
-    "id": 37,
-    "name": "player_left_31",
-    "supercategory": "person"
-  },
-  {
-    "id": 38,
-    "name": "player_left_33",
-    "supercategory": "person"
-  },
-  {
-    "id": 39,
-    "name": "player_left_34",
-    "supercategory": "person"
-  },
-  {
-    "id": 40,
-    "name": "player_left_36",
-    "supercategory": "person"
-  },
-  {
-    "id": 41,
-    "name": "player_left_4",
-    "supercategory": "person"
-  },
-  {
-    "id": 42,
-    "name": "player_left_43",
-    "supercategory": "person"
-  },
-  {
-    "id": 43,
-    "name": "player_left_44",
-    "supercategory": "person"
-  },
-  {
-    "id": 44,
-    "name": "player_left_5",
-    "supercategory": "person"
-  },
-  {
-    "id": 45,
-    "name": "player_left_50",
-    "supercategory": "person"
-  },
-  {
-    "id": 46,
-    "name": "player_left_55",
-    "supercategory": "person"
-  },
-  {
-    "id": 47,
-    "name": "player_left_56",
-    "supercategory": "person"
-  },
-  {
-    "id": 48,
-    "name": "player_left_59",
-    "supercategory": "person"
-  },
-  {
-    "id": 49,
-    "name": "player_left_60",
-    "supercategory": "person"
-  },
-  {
-    "id": 50,
-    "name": "player_left_62",
-    "supercategory": "person"
-  },
-  {
-    "id": 51,
-    "name": "player_left_69",
-    "supercategory": "person"
-  },
-  {
-    "id": 52,
-    "name": "player_left_7",
-    "supercategory": "person"
-  },
-  {
-    "id": 53,
-    "name": "player_left_8",
-    "supercategory": "person"
-  },
-  {
-    "id": 54,
-    "name": "player_left_9",
-    "supercategory": "person"
-  },
-  {
-    "id": 55,
-    "name": "player_left_93",
-    "supercategory": "person"
-  },
-  {
-    "id": 56,
-    "name": "player_left_99",
-    "supercategory": "person"
-  },
-  {
-    "id": 57,
-    "name": "player_right",
-    "supercategory": "person"
-  },
-  {
-    "id": 58,
-    "name": "player_right_10",
-    "supercategory": "person"
-  },
-  {
-    "id": 59,
-    "name": "player_right_11",
-    "supercategory": "person"
-  },
-  {
-    "id": 60,
-    "name": "player_right_14",
-    "supercategory": "person"
-  },
-  {
-    "id": 61,
-    "name": "player_right_15",
-    "supercategory": "person"
-  },
-  {
-    "id": 62,
-    "name": "player_right_16",
-    "supercategory": "person"
-  },
-  {
-    "id": 63,
-    "name": "player_right_17",
-    "supercategory": "person"
-  },
-  {
-    "id": 64,
-    "name": "player_right_2",
-    "supercategory": "person"
-  },
-  {
-    "id": 65,
-    "name": "player_right_20",
-    "supercategory": "person"
-  },
-  {
-    "id": 66,
-    "name": "player_right_21",
-    "supercategory": "person"
-  },
-  {
-    "id": 67,
-    "name": "player_right_22",
-    "supercategory": "person"
-  },
-  {
-    "id": 68,
-    "name": "player_right_23",
-    "supercategory": "person"
-  },
-  {
-    "id": 69,
-    "name": "player_right_24",
-    "supercategory": "person"
-  },
-  {
-    "id": 70,
-    "name": "player_right_25",
-    "supercategory": "person"
-  },
-  {
-    "id": 71,
-    "name": "player_right_26",
-    "supercategory": "person"
-  },
-  {
-    "id": 72,
-    "name": "player_right_27",
-    "supercategory": "person"
-  },
-  {
-    "id": 73,
-    "name": "player_right_29",
-    "supercategory": "person"
-  },
-  {
-    "id": 74,
-    "name": "player_right_3",
-    "supercategory": "person"
-  },
-  {
-    "id": 75,
-    "name": "player_right_30",
-    "supercategory": "person"
-  },
-  {
-    "id": 76,
-    "name": "player_right_31",
-    "supercategory": "person"
-  },
-  {
-    "id": 77,
-    "name": "player_right_33",
-    "supercategory": "person"
-  },
-  {
-    "id": 78,
-    "name": "player_right_34",
-    "supercategory": "person"
-  },
-  {
-    "id": 79,
-    "name": "player_right_36",
-    "supercategory": "person"
-  },
-  {
-    "id": 80,
-    "name": "player_right_38",
-    "supercategory": "person"
-  },
-  {
-    "id": 81,
-    "name": "player_right_4",
-    "supercategory": "person"
-  },
-  {
-    "id": 82,
-    "name": "player_right_43",
-    "supercategory": "person"
-  },
-  {
-    "id": 83,
-    "name": "player_right_44",
-    "supercategory": "person"
-  },
-  {
-    "id": 84,
-    "name": "player_right_45",
-    "supercategory": "person"
-  },
-  {
-    "id": 85,
-    "name": "player_right_5",
-    "supercategory": "person"
-  },
-  {
-    "id": 86,
-    "name": "player_right_50",
-    "supercategory": "person"
-  },
-  {
-    "id": 87,
-    "name": "player_right_53",
-    "supercategory": "person"
-  },
-  {
-    "id": 88,
-    "name": "player_right_55",
-    "supercategory": "person"
-  },
-  {
-    "id": 89,
-    "name": "player_right_56",
-    "supercategory": "person"
-  },
-  {
-    "id": 90,
-    "name": "player_right_59",
-    "supercategory": "person"
-  },
-  {
-    "id": 91,
-    "name": "player_right_6",
-    "supercategory": "person"
-  },
-  {
-    "id": 92,
-    "name": "player_right_62",
-    "supercategory": "person"
-  },
-  {
-    "id": 93,
-    "name": "player_right_7",
-    "supercategory": "person"
-  },
-  {
-    "id": 94,
-    "name": "player_right_76",
-    "supercategory": "person"
-  },
-  {
-    "id": 95,
-    "name": "player_right_78",
-    "supercategory": "person"
-  },
-  {
-    "id": 96,
-    "name": "player_right_8",
-    "supercategory": "person"
-  },
-  {
-    "id": 97,
-    "name": "player_right_9",
-    "supercategory": "person"
-  },
-  {
-    "id": 98,
-    "name": "player_right_93",
-    "supercategory": "person"
-  },
-  {
-    "id": 99,
-    "name": "referee_main",
-    "supercategory": "person"
-  },
-  {
-    "id": 100,
-    "name": "referee_side_bottom",
-    "supercategory": "person"
-  },
-  {
-    "id": 101,
-    "name": "referee_side_top",
-    "supercategory": "person"
-  }
-]
+def attributes_to_class_name(role, team, jersey_number):
+    # if role == "goalkeeper":
+    if "goalkeeper" in role:
+        role = "goalkeeper"  # some are tagged as "goalkeepersS"
+        category = f"{role}_{team}_{jersey_number}" if jersey_number is not None else f"{role}_{team}"
+    elif role == "player":
+        category = f"{role}_{team}_{jersey_number}" if jersey_number is not None else f"{role}_{team}"
+    elif role == "referee":
+        category = f"{role}"
+    elif role == "ball":
+        category = f"{role}"
+    elif role == "other":
+        category = f"{role}"
+    else:
+        category = f"unknown_{role}"
+    return category
+
+
+# def add_noise_to_data(raw_data, num_timesteps, proba=0.5):
+#     all_classes = np.unique(np.concatenate(raw_data['tracker_classes']))
+#     all_ids = np.unique(np.concatenate(raw_data['tracker_ids']))
+#
+#     for t in range(num_timesteps):
+#         if raw_data['tracker_classes'][t] is not None:
+#             for i in range(len(raw_data['tracker_classes'][t])):
+#                 if random.random() < proba:
+#                     raw_data['tracker_classes'][t][i] = random.choice(all_classes)
+#
+#         if raw_data['tracker_dets'][t] is not None:
+#             for i in range(len(raw_data['tracker_dets'][t])):
+#                 shift_x = raw_data['tracker_dets'][t][i][2] * random.uniform(-0.1, 0.1)
+#                 shift_y = raw_data['tracker_dets'][t][i][3] * random.uniform(-0.1, 0.1)
+#                 raw_data['tracker_dets'][t][i][0] += shift_x
+#                 raw_data['tracker_dets'][t][i][1] += shift_y
+#
+#         if random.random() < proba and len(raw_data['tracker_ids'][t]) > 0:
+#             remove_index = random.randint(0, len(raw_data['tracker_ids'][t]) - 1)
+#             raw_data['tracker_ids'][t] = np.delete(raw_data['tracker_ids'][t], remove_index)
+#             raw_data['tracker_classes'][t] = np.delete(raw_data['tracker_classes'][t], remove_index)
+#             raw_data['tracker_dets'][t] = np.delete(raw_data['tracker_dets'][t], remove_index, axis=0)
+#             raw_data['tracker_confidences'][t] = np.delete(raw_data['tracker_confidences'][t], remove_index)
+#             raw_data['gt_extras'][t].pop(remove_index)
+#
+#     return raw_data
+
+
+sn_classes = [{'id': 1, 'name': 'player_left_36', 'supercategory': 'object'}, {'id': 2, 'name': 'player_left_15', 'supercategory': 'object'}, {'id': 3, 'name': 'player_right_16', 'supercategory': 'object'}, {'id': 4, 'name': 'player_left_8', 'supercategory': 'object'}, {'id': 5, 'name': 'player_left_4', 'supercategory': 'object'}, {'id': 6, 'name': 'player_left_5', 'supercategory': 'object'}, {'id': 7, 'name': 'player_right_20', 'supercategory': 'object'}, {'id': 8, 'name': 'player_right_99', 'supercategory': 'object'}, {'id': 9, 'name': 'referee', 'supercategory': 'object'}, {'id': 10, 'name': 'player_right_10', 'supercategory': 'object'}, {'id': 11, 'name': 'player_left_10', 'supercategory': 'object'}, {'id': 12, 'name': 'ball', 'supercategory': 'object'}, {'id': 13, 'name': 'goalkeeper_left', 'supercategory': 'object'}, {'id': 14, 'name': 'player_right_8', 'supercategory': 'object'}, {'id': 15, 'name': 'player_left_14', 'supercategory': 'object'}, {'id': 16, 'name': 'player_left_50', 'supercategory': 'object'}, {'id': 17, 'name': 'player_right_38', 'supercategory': 'object'}, {'id': 18, 'name': 'player_right_43', 'supercategory': 'object'}, {'id': 19, 'name': 'player_left_11', 'supercategory': 'object'}, {'id': 20, 'name': 'player_right_22', 'supercategory': 'object'}, {'id': 21, 'name': 'player_right_5', 'supercategory': 'object'}, {'id': 22, 'name': 'player_left_43', 'supercategory': 'object'}, {'id': 23, 'name': 'player_right_23', 'supercategory': 'object'}, {'id': 24, 'name': 'player_left_16', 'supercategory': 'object'}, {'id': 25, 'name': 'player_right', 'supercategory': 'object'}, {'id': 26, 'name': 'player_left', 'supercategory': 'object'}, {'id': 27, 'name': 'player_right_30', 'supercategory': 'object'}, {'id': 28, 'name': 'goalkeeper_right', 'supercategory': 'object'}]
