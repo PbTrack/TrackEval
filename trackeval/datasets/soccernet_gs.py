@@ -127,46 +127,26 @@ class SoccerNetGS(_BaseDataset):
         return self.tracker_to_disp[tracker]
 
     def _get_seq_info(self):
-        seq_list = []
-        seq_lengths = {}
         if self.config["SEQ_INFO"]:
             seq_list = list(self.config["SEQ_INFO"].keys())
             seq_lengths = self.config["SEQ_INFO"]
-
-            # If sequence length is 'None' tries to read sequence length from .ini files.
-            for seq, seq_length in seq_lengths.items():
-                if seq_length is None:
-                    ini_file = os.path.join(self.gt_fol, seq, 'seqinfo.ini')
-                    if not os.path.isfile(ini_file):
-                        raise TrackEvalException('ini file does not exist: ' + seq + '/' + os.path.basename(ini_file))
-                    ini_data = configparser.ConfigParser()
-                    ini_data.read(ini_file)
-                    seq_lengths[seq] = int(ini_data['Sequence']['seqLength'])
-
-        else:  # FIXME compute SEQ based on json
+        else:
             if self.config["SEQMAP_FILE"]:
                 seqmap_file = self.config["SEQMAP_FILE"]
             else:
                 if self.config["SEQMAP_FOLDER"] is None:
-                    seqmap_file = os.path.join(self.config['GT_FOLDER'], 'seqmaps', self.gt_set + '.txt')
+                    seqmap_file = os.path.join(self.config['GT_FOLDER'], self.gt_set + '.txt')
                 else:
                     seqmap_file = os.path.join(self.config["SEQMAP_FOLDER"], self.gt_set + '.txt')
+
             if not os.path.isfile(seqmap_file):
                 print('no seqmap found: ' + seqmap_file)
                 raise TrackEvalException('no seqmap found: ' + os.path.basename(seqmap_file))
-            with open(seqmap_file) as fp:
-                reader = csv.reader(fp)
-                for i, row in enumerate(reader):
-                    if i == 0 or row[0] == '':
-                        continue
-                    seq = row[0]
-                    seq_list.append(seq)
-                    ini_file = os.path.join(self.gt_fol, seq, 'seqinfo.ini')
-                    if not os.path.isfile(ini_file):
-                        raise TrackEvalException('ini file does not exist: ' + seq + '/' + os.path.basename(ini_file))
-                    ini_data = configparser.ConfigParser()
-                    ini_data.read(ini_file)
-                    seq_lengths[seq] = int(ini_data['Sequence']['seqLength'])
+            with open(seqmap_file, 'r') as f:
+                data = json.load(f)
+
+            seq_list = [seq["name"] for seq in data]
+            seq_lengths = {seq["name"]: seq["nframes"] for seq in data}
         return seq_list, seq_lengths
 
     def _load_raw_file(self, tracker, seq, is_gt):
