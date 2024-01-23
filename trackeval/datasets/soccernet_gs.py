@@ -21,7 +21,6 @@ class SoccerNetGS(_BaseDataset):
             'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/SoccerNetGS/'),  # Trackers location
             'OUTPUT_FOLDER': None,  # Where to save eval results (if None, same as TRACKERS_FOLDER)
             'TRACKERS_TO_EVAL': None,  # Filenames of trackers to eval (if None, all in folder)
-            'CLASSES_TO_EVAL': [category["name"] for category in sn_classes],  # FIXME not used
             'SPLIT_TO_EVAL': 'val',  # Valid: 'train', 'val', 'test', 'challenge'
             'INPUT_AS_ZIP': False,  # Whether tracker input files are zipped
             'PRINT_CONFIG': True,  # Whether to print current config
@@ -53,6 +52,9 @@ class SoccerNetGS(_BaseDataset):
             split_fol = ''
         self.gt_fol = os.path.join(self.config['GT_FOLDER'], split_fol)
         self.tracker_fol = os.path.join(self.config['TRACKERS_FOLDER'], split_fol)
+        self.seq_list, self.seq_lengths = self._get_seq_info()
+        self.all_classes = extract_all_classes(self.config, self.gt_fol, self.seq_list)
+        self.class_name_to_class_id = {clazz["name"]: clazz["id"] for clazz in self.all_classes.values()}
 
         self.should_classes_combine = True
         self.use_super_categories = False  # TODO
@@ -60,7 +62,6 @@ class SoccerNetGS(_BaseDataset):
         self.do_preproc = self.config['DO_PREPROC']
         self.all_classes = {}
         self.class_counter = 1
-        self.class_names_to_ids = {category["name"]: category["id"] for category in sn_classes}
 
         self.output_fol = self.config['OUTPUT_FOLDER']
         if self.output_fol is None:
@@ -70,14 +71,11 @@ class SoccerNetGS(_BaseDataset):
         self.output_sub_fol = self.config['OUTPUT_SUB_FOLDER']
 
         # Get classes to eval
-        classes_to_id = {category["name"]: category["id"] for category in sn_classes}
-        self.valid_classes = classes_to_id.keys()  # TODO remove ball
-        self.class_list = classes_to_id.keys()
-        self.class_name_to_class_id = classes_to_id
+        self.valid_classes = self.class_name_to_class_id.keys()
+        self.class_list = self.class_name_to_class_id.keys()
         self.valid_class_numbers = list(self.class_name_to_class_id.values())
 
         # Get sequences to eval and check gt files exist
-        self.seq_list, self.seq_lengths = self._get_seq_info()
         if len(self.seq_list) < 1:
             raise TrackEvalException('No sequences are selected to be evaluated.')
 
@@ -269,7 +267,7 @@ class SoccerNetGS(_BaseDataset):
                 "tracker_classes": [np.array(x) for x in classes],
                 "tracker_dets": dets,
                 "tracker_ids": [np.array(x) for x in ids],
-                "gt_extras": extras,
+                "tracker_extras": extras,
                 "tracker_confidences": [np.array(x) for x in confidences],
             }
             # raw_data = add_noise_to_data(raw_data, len(self.images))
@@ -373,7 +371,6 @@ class SoccerNetGS(_BaseDataset):
         similarity_scores = self._calculate_box_ious(gt_dets_t, tracker_dets_t, box_format='xywh')
         return similarity_scores
 
-
 def attributes_to_class_name(role, team, jersey_number):
     # if role == "goalkeeper":
     if "goalkeeper" in role:
@@ -390,6 +387,31 @@ def attributes_to_class_name(role, team, jersey_number):
     else:
         category = f"unknown_{role}"
     return category
+
+
+def extract_all_classes(config, gt_fol, seq_list):
+    all_classes = {}
+    for seq in seq_list:
+        # File location
+        file = config["GT_LOC_FORMAT"].format(gt_folder=gt_fol, seq=seq)
+
+        with open(file, 'r') as f:
+            data = json.load(f)
+
+        for annotation in data["annotations"]:
+            if annotation["supercategory"] != "object":  # ignore pitch and camera
+                continue
+            role = annotation["attributes"]["role"]
+            jersey_number = annotation["attributes"]["jersey"]
+            team = annotation["attributes"]["team"]
+            class_name = attributes_to_class_name(role, team, jersey_number)
+            if class_name not in all_classes:
+                all_classes[class_name] = {
+                    "id": len(all_classes) + 1,
+                    "name": class_name,
+                    "supercategory": "object"
+                }
+    return all_classes
 
 
 # def add_noise_to_data(raw_data, num_timesteps, proba=0.5):
@@ -418,6 +440,3 @@ def attributes_to_class_name(role, team, jersey_number):
 #             raw_data['gt_extras'][t].pop(remove_index)
 #
 #     return raw_data
-
-
-sn_classes = [{'id': 1, 'name': 'player_left_36', 'supercategory': 'object'}, {'id': 2, 'name': 'player_left_15', 'supercategory': 'object'}, {'id': 3, 'name': 'player_right_16', 'supercategory': 'object'}, {'id': 4, 'name': 'player_left_8', 'supercategory': 'object'}, {'id': 5, 'name': 'player_left_4', 'supercategory': 'object'}, {'id': 6, 'name': 'player_left_5', 'supercategory': 'object'}, {'id': 7, 'name': 'player_right_20', 'supercategory': 'object'}, {'id': 8, 'name': 'player_right_99', 'supercategory': 'object'}, {'id': 9, 'name': 'referee', 'supercategory': 'object'}, {'id': 10, 'name': 'player_right_10', 'supercategory': 'object'}, {'id': 11, 'name': 'player_left_10', 'supercategory': 'object'}, {'id': 12, 'name': 'ball', 'supercategory': 'object'}, {'id': 13, 'name': 'goalkeeper_left', 'supercategory': 'object'}, {'id': 14, 'name': 'player_right_8', 'supercategory': 'object'}, {'id': 15, 'name': 'player_left_14', 'supercategory': 'object'}, {'id': 16, 'name': 'player_left_50', 'supercategory': 'object'}, {'id': 17, 'name': 'player_right_38', 'supercategory': 'object'}, {'id': 18, 'name': 'player_right_43', 'supercategory': 'object'}, {'id': 19, 'name': 'player_left_11', 'supercategory': 'object'}, {'id': 20, 'name': 'player_right_22', 'supercategory': 'object'}, {'id': 21, 'name': 'player_right_5', 'supercategory': 'object'}, {'id': 22, 'name': 'player_left_43', 'supercategory': 'object'}, {'id': 23, 'name': 'player_right_23', 'supercategory': 'object'}, {'id': 24, 'name': 'player_left_16', 'supercategory': 'object'}, {'id': 25, 'name': 'player_right', 'supercategory': 'object'}, {'id': 26, 'name': 'player_left', 'supercategory': 'object'}, {'id': 27, 'name': 'player_right_30', 'supercategory': 'object'}, {'id': 28, 'name': 'goalkeeper_right', 'supercategory': 'object'}]
