@@ -53,14 +53,19 @@ class SoccerNetGS(_BaseDataset):
         self.gt_fol = os.path.join(self.config['GT_FOLDER'], split_fol)
         self.tracker_fol = os.path.join(self.config['TRACKERS_FOLDER'], split_fol)
         self.seq_list, self.seq_lengths = self._get_seq_info()
-        self.all_classes = extract_all_classes(self.config, self.gt_fol, self.seq_list)
-        self.class_name_to_class_id = {clazz["name"]: clazz["id"] for clazz in self.all_classes.values()}
-
+        self.eval_mode = 'distance' # 'distance' or 'classes'  # TODO
+        self.all_classes = {}
+        if self.eval_mode == 'classes':
+            self.all_classes = extract_all_classes(self.config, self.gt_fol, self.seq_list)
+            self.class_name_to_class_id = {clazz["name"]: clazz["id"] for clazz in self.all_classes.values()}
+        else:
+            self.class_name_to_class_id = {
+                "person": 1,
+            }
         self.should_classes_combine = True
         self.use_super_categories = False  # TODO
         self.data_is_zipped = self.config['INPUT_AS_ZIP']
         self.do_preproc = self.config['DO_PREPROC']
-        self.all_classes = {}
         self.class_counter = 1
 
         self.output_fol = self.config['OUTPUT_FOLDER']
@@ -71,9 +76,9 @@ class SoccerNetGS(_BaseDataset):
         self.output_sub_fol = self.config['OUTPUT_SUB_FOLDER']
 
         # Get classes to eval
-        self.valid_classes = self.class_name_to_class_id.keys()
+        self.valid_classes = self.class_name_to_class_id.keys()  # FIXME
         self.class_list = self.class_name_to_class_id.keys()
-        self.valid_class_numbers = list(self.class_name_to_class_id.values())
+        self.valid_class_numbers = list(self.class_name_to_class_id.values())  # FIXME
 
         # Get sequences to eval and check gt files exist
         if len(self.seq_list) < 1:
@@ -185,23 +190,23 @@ class SoccerNetGS(_BaseDataset):
         extras = [None] * num_timesteps
         confidences = [None] * num_timesteps
 
-        # detections = data["annotations"] if is_gt else data["predictions"]
-        # for annotation in detections:  # FIXME
-        for annotation in data["annotations"]:  # TODO remove
-            if annotation["supercategory"] != "object":  # ignore pitch and camera
-                continue
-            role = annotation["attributes"]["role"]
-            jersey_number = annotation["attributes"]["jersey"]
-            team = annotation["attributes"]["team"]
-            class_name = attributes_to_class_name(role, team, jersey_number)
-            if class_name not in self.all_classes:
-                self.all_classes[class_name] = {
-                    "id": self.class_counter,
-                    "name": class_name,
-                    "supercategory": "object"
-                }
-                self.class_counter += 1
-        list(self.all_classes.values())
+        # # detections = data["annotations"] if is_gt else data["predictions"]
+        # # for annotation in detections:  # FIXME
+        # for annotation in data["annotations"]:  # TODO remove
+        #     if annotation["supercategory"] != "object":  # ignore pitch and camera
+        #         continue
+        #     role = annotation["attributes"]["role"]
+        #     jersey_number = annotation["attributes"]["jersey"]
+        #     team = annotation["attributes"]["team"]
+        #     class_name = attributes_to_class_name(role, team, jersey_number)
+        #     if class_name not in self.all_classes:
+        #         self.all_classes[class_name] = {
+        #             "id": self.class_counter,
+        #             "name": class_name,
+        #             "supercategory": "object"
+        #         }
+        #         self.class_counter += 1
+        # list(self.all_classes.values())
 
         for annotation in data["annotations"]:
             if annotation["supercategory"] != "object":  # ignore pitch and camera
@@ -237,10 +242,14 @@ class SoccerNetGS(_BaseDataset):
                 # Add more fields as needed
             })
 
-            class_name = attributes_to_class_name(role, team, jersey_number)
-            class_id = self.class_name_to_class_id[class_name]
-            # class_id = self.class_name_to_class_id[class_name] if class_name in self.class_name_to_class_id else -1
-            classes[timestep].append(class_id)
+            if self.eval_mode == 'classes':
+                class_name = attributes_to_class_name(role, team, jersey_number)
+                class_id = self.class_name_to_class_id[class_name]
+                # class_id = self.class_name_to_class_id[class_name] if class_name in self.class_name_to_class_id else -1
+                classes[timestep].append(class_id)
+            else:
+                classes[timestep].append(1)
+
             
 
         # Convert lists to numpy arrays
@@ -331,7 +340,7 @@ class SoccerNetGS(_BaseDataset):
             data['tracker_ids'][t] = tracker_ids
             data['tracker_dets'][t] = tracker_dets
             data['gt_ids'][t] = gt_ids
-            data['gt_dets'][t] = gt_dets
+            data['gt_dets'][t] = gt_dets  # FIXME assert not 0 size
             data['similarity_scores'][t] = similarity_scores
 
             unique_gt_ids += list(np.unique(data['gt_ids'][t]))
@@ -370,6 +379,57 @@ class SoccerNetGS(_BaseDataset):
     def _calculate_similarities(self, gt_dets_t, tracker_dets_t):
         similarity_scores = self._calculate_box_ious(gt_dets_t, tracker_dets_t, box_format='xywh')
         return similarity_scores
+
+    @_timing.time
+    def get_raw_seq_data(self, tracker, seq):
+        """ Loads raw data (tracker and ground-truth) for a single tracker on a single sequence.
+        Raw data includes all of the information needed for both preprocessing and evaluation, for all classes.
+        A later function (get_processed_seq_data) will perform such preprocessing and extract relevant information for
+        the evaluation of each class.
+
+        This returns a dict which contains the fields:
+        [num_timesteps]: integer
+        [gt_ids, tracker_ids, gt_classes, tracker_classes, tracker_confidences]:
+                                                                list (for each timestep) of 1D NDArrays (for each det).
+        [gt_dets, tracker_dets, gt_crowd_ignore_regions]: list (for each timestep) of lists of detections.
+        [similarity_scores]: list (for each timestep) of 2D NDArrays.
+        [gt_extras]: dict (for each extra) of lists (for each timestep) of 1D NDArrays (for each det).
+
+        gt_extras contains dataset specific information used for preprocessing such as occlusion and truncation levels.
+
+        Note that similarities are extracted as part of the dataset and not the metric, because almost all metrics are
+        independent of the exact method of calculating the similarity. However datasets are not (e.g. segmentation
+        masks vs 2D boxes vs 3D boxes).
+        We calculate the similarity before preprocessing because often both preprocessing and evaluation require it and
+        we don't wish to calculate this twice.
+        We calculate similarity between all gt and tracker classes (not just each class individually) to allow for
+        calculation of metrics such as class confusion matrices. Typically the impact of this on performance is low.
+
+        SoccerNet game state specificity: similarity score is set to 0 if the attributes (jersey number, team, ...) of the tracker and the ground do not match.
+        """
+        # Load raw data.
+        raw_gt_data = self._load_raw_file(tracker, seq, is_gt=True)
+        raw_tracker_data = self._load_raw_file(tracker, seq, is_gt=False)
+        raw_data = {**raw_tracker_data, **raw_gt_data}  # Merges dictionaries
+
+        # Calculate similarities for each timestep.
+        similarity_scores = []
+        for t, (gt_dets_t, tracker_dets_t, gt_extras_t, tracker_extras_t) in enumerate(
+                zip(raw_data['gt_dets'], raw_data['tracker_dets'], raw_data['gt_extras'], raw_data['tracker_extras'])):
+            ious = self._calculate_similarities(gt_dets_t, tracker_dets_t)
+
+            if self.eval_mode == 'distance':
+                # Set similarity score to 0 if attributes do not match
+                for i, (gt_extra, tracker_extra) in enumerate(zip(gt_extras_t, tracker_extras_t)):
+                    # if gt_extra['role'] != tracker_extra['role'] or gt_extra['team'] != tracker_extra['team'] or gt_extra['jersey'] != tracker_extra['jersey']:
+                    if attributes_to_class_name(gt_extra['role'], gt_extra['team'], gt_extra['jersey']) != attributes_to_class_name(tracker_extra['role'], tracker_extra['team'], tracker_extra['jersey']):
+                        ious[i] = 0
+
+            similarity_scores.append(ious)
+            # assert not np.any((ious != 1) & (ious != 0))
+        raw_data['similarity_scores'] = similarity_scores
+        return raw_data
+
 
 def attributes_to_class_name(role, team, jersey_number):
     # if role == "goalkeeper":
@@ -414,29 +474,28 @@ def extract_all_classes(config, gt_fol, seq_list):
     return all_classes
 
 
-# def add_noise_to_data(raw_data, num_timesteps, proba=0.5):
-#     all_classes = np.unique(np.concatenate(raw_data['tracker_classes']))
-#     all_ids = np.unique(np.concatenate(raw_data['tracker_ids']))
-#
-#     for t in range(num_timesteps):
-#         if raw_data['tracker_classes'][t] is not None:
-#             for i in range(len(raw_data['tracker_classes'][t])):
-#                 if random.random() < proba:
-#                     raw_data['tracker_classes'][t][i] = random.choice(all_classes)
-#
-#         if raw_data['tracker_dets'][t] is not None:
-#             for i in range(len(raw_data['tracker_dets'][t])):
-#                 shift_x = raw_data['tracker_dets'][t][i][2] * random.uniform(-0.1, 0.1)
-#                 shift_y = raw_data['tracker_dets'][t][i][3] * random.uniform(-0.1, 0.1)
-#                 raw_data['tracker_dets'][t][i][0] += shift_x
-#                 raw_data['tracker_dets'][t][i][1] += shift_y
-#
-#         if random.random() < proba and len(raw_data['tracker_ids'][t]) > 0:
-#             remove_index = random.randint(0, len(raw_data['tracker_ids'][t]) - 1)
-#             raw_data['tracker_ids'][t] = np.delete(raw_data['tracker_ids'][t], remove_index)
-#             raw_data['tracker_classes'][t] = np.delete(raw_data['tracker_classes'][t], remove_index)
-#             raw_data['tracker_dets'][t] = np.delete(raw_data['tracker_dets'][t], remove_index, axis=0)
-#             raw_data['tracker_confidences'][t] = np.delete(raw_data['tracker_confidences'][t], remove_index)
-#             raw_data['gt_extras'][t].pop(remove_index)
-#
-#     return raw_data
+def add_noise_to_data(raw_data, num_timesteps, proba=0.2):
+    all_classes = np.unique(np.concatenate(raw_data['tracker_classes']))
+
+    for t in range(num_timesteps):
+        # if raw_data['tracker_classes'][t] is not None:
+        #     for i in range(len(raw_data['tracker_classes'][t])):
+        #         if random.random() < proba:
+        #             raw_data['tracker_classes'][t][i] = random.choice(all_classes)
+
+        if raw_data['tracker_dets'][t] is not None:
+            for i in range(len(raw_data['tracker_dets'][t])):
+                shift_x = raw_data['tracker_dets'][t][i][2] * random.uniform(-0.1, 0.1)
+                shift_y = raw_data['tracker_dets'][t][i][3] * random.uniform(-0.1, 0.1)
+                raw_data['tracker_dets'][t][i][0] += shift_x
+                raw_data['tracker_dets'][t][i][1] += shift_y
+
+        if random.random() < proba and len(raw_data['tracker_ids'][t]) > 0:
+            remove_index = random.randint(0, len(raw_data['tracker_ids'][t]) - 1)
+            raw_data['tracker_ids'][t] = np.delete(raw_data['tracker_ids'][t], remove_index)
+            raw_data['tracker_classes'][t] = np.delete(raw_data['tracker_classes'][t], remove_index)
+            raw_data['tracker_dets'][t] = np.delete(raw_data['tracker_dets'][t], remove_index, axis=0)
+            raw_data['tracker_confidences'][t] = np.delete(raw_data['tracker_confidences'][t], remove_index)
+            raw_data['tracker_extras'][t].pop(remove_index)
+
+    return raw_data
