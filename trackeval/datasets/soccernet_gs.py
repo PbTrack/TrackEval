@@ -269,7 +269,7 @@ class SoccerNetGS(_BaseDataset):
                 "gt_crowd_ignore_regions": crowd_ignore_regions,
                 "gt_dets": dets,
                 "gt_extras": extras,
-                "gt_ids": [np.array(x) for x in ids],
+                "gt_ids": [np.array(x).astype(int) for x in ids],
                 "seq": seq,
                 "num_timesteps": num_timesteps,
             }
@@ -277,7 +277,7 @@ class SoccerNetGS(_BaseDataset):
             raw_data = {
                 "tracker_classes": [np.array(x) for x in classes],
                 "tracker_dets": dets,
-                "tracker_ids": [np.array(x) for x in ids],
+                "tracker_ids": [np.array(x).astype(int) for x in ids],
                 "tracker_extras": extras,
                 "tracker_confidences": [np.array(x) for x in confidences],
             }
