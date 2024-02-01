@@ -45,8 +45,8 @@ class SoccerNetGS(_BaseDataset):
         self.config = utils.init_config(config, self.get_default_dataset_config(), self.get_name())
 
         self.benchmark = 'SoccerNetGS'
-        gt_set = self.config['SPLIT_TO_EVAL']
-        self.gt_set = self.benchmark + '-' + self.config['SPLIT_TO_EVAL']
+        gt_set = self.benchmark + '-' + self.config['SPLIT_TO_EVAL']
+        self.gt_set = gt_set
         if not self.config['SKIP_SPLIT_FOL']:
             split_fol = gt_set
         else:
