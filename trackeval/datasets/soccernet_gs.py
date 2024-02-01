@@ -45,7 +45,7 @@ class SoccerNetGS(_BaseDataset):
         self.config = utils.init_config(config, self.get_default_dataset_config(), self.get_name())
 
         gt_set = self.config['SPLIT_TO_EVAL']
-        self.gt_set = gt_set
+        self.gt_set = self.benchmark + '-' + self.config['SPLIT_TO_EVAL']
         if not self.config['SKIP_SPLIT_FOL']:
             split_fol = gt_set
         else:
@@ -208,7 +208,8 @@ class SoccerNetGS(_BaseDataset):
         #         self.class_counter += 1
         # list(self.all_classes.values())
 
-        for annotation in data["annotations"]:
+        key = "annotations" if is_gt else "predictions"
+        for annotation in data[key]:
             if annotation["supercategory"] != "object":  # ignore pitch and camera
                 continue
             timestep = self.image_id_to_timestep[annotation["image_id"]]
