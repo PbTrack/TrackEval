@@ -17,11 +17,11 @@ class SoccerNetGS(_BaseDataset):
         """Default class config values"""
         code_path = utils.get_code_path()
         default_config = {
-            'GT_FOLDER': os.path.join(code_path, 'data/SoccerNetGS/val'),  # Location of GT data
+            'GT_FOLDER': os.path.join(code_path, 'data/SoccerNetGS'),  # Location of GT data
             'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/SoccerNetGS/'),  # Trackers location
             'OUTPUT_FOLDER': None,  # Where to save eval results (if None, same as TRACKERS_FOLDER)
             'TRACKERS_TO_EVAL': None,  # Filenames of trackers to eval (if None, all in folder)
-            'SPLIT_TO_EVAL': 'val',  # Valid: 'train', 'val', 'test', 'challenge'
+            'SPLIT_TO_EVAL': 'validation',  # Valid: 'train', 'val', 'test', 'challenge'
             'INPUT_AS_ZIP': False,  # Whether tracker input files are zipped
             'PRINT_CONFIG': True,  # Whether to print current config
             'DO_PREPROC': True,  # Whether to perform preprocessing (never done for MOT15)
