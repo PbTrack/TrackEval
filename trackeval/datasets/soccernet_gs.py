@@ -1,9 +1,6 @@
 import json
 import os
-import csv
-import configparser
 import numpy as np
-import random
 from ._base_dataset import _BaseDataset
 from .. import utils
 from .. import _timing
@@ -22,6 +19,10 @@ class SoccerNetGS(_BaseDataset):
             'OUTPUT_FOLDER': None,  # Where to save eval results (if None, same as TRACKERS_FOLDER)
             'TRACKERS_TO_EVAL': None,  # Filenames of trackers to eval (if None, all in folder)
             'SPLIT_TO_EVAL': 'validation',  # Valid: 'train', 'val', 'test', 'challenge'
+            'EVAL_MODE': 'distance',  # Valid: 'distance' or 'classes'
+            'EVAL_SPACE': 'pitch',  # Valid: 'image', 'pitch'
+            'EVAL_SIMILARITY_METRIC': 'gaussian',  # Valid: 'iou', 'eucl', 'gaussian'
+            'EVAL_SIGMA': 2.5,  # Sigma parameter for the gaussian similarity metric.
             'INPUT_AS_ZIP': False,  # Whether tracker input files are zipped
             'PRINT_CONFIG': True,  # Whether to print current config
             'DO_PREPROC': True,  # Whether to perform preprocessing (never done for MOT15)
@@ -45,16 +46,21 @@ class SoccerNetGS(_BaseDataset):
         self.config = utils.init_config(config, self.get_default_dataset_config(), self.get_name())
 
         self.benchmark = 'SoccerNetGS'
-        gt_set = self.benchmark + '-' + self.config['SPLIT_TO_EVAL']
-        self.gt_set = gt_set
         if not self.config['SKIP_SPLIT_FOL']:
-            split_fol = gt_set
+            gt_split_fol = self.config['SPLIT_TO_EVAL']
+            track_split_fol = self.benchmark + '-' + self.config['SPLIT_TO_EVAL']
         else:
-            split_fol = ''
-        self.gt_fol = os.path.join(self.config['GT_FOLDER'], split_fol)
-        self.tracker_fol = os.path.join(self.config['TRACKERS_FOLDER'], split_fol)
+            gt_split_fol = ''
+            track_split_fol = ''
+        self.gt_fol = os.path.join(self.config['GT_FOLDER'], gt_split_fol)
+        self.tracker_fol = os.path.join(self.config['TRACKERS_FOLDER'], track_split_fol)
         self.seq_list, self.seq_lengths = self._get_seq_info()
-        self.eval_mode = 'distance' # 'distance' or 'classes'  # TODO
+        self.eval_mode = self.config['EVAL_MODE']
+        self.eval_space = self.config['EVAL_SPACE']
+        self.eval_sim_metric = self.config['EVAL_SIMILARITY_METRIC']
+        self.eval_sigma = self.config['EVAL_SIGMA']
+        self.ignore_ball = self.config['IGNORE_BALL']
+        self.all_similarity_scores = []
         self.all_classes = {}
         if self.eval_mode == 'classes':
             self.all_classes = extract_all_classes(self.config, self.gt_fol, self.seq_list)
@@ -77,9 +83,9 @@ class SoccerNetGS(_BaseDataset):
         self.output_sub_fol = self.config['OUTPUT_SUB_FOLDER']
 
         # Get classes to eval
-        self.valid_classes = self.class_name_to_class_id.keys()  # FIXME
+        self.valid_classes = self.class_name_to_class_id.keys()
         self.class_list = self.class_name_to_class_id.keys()
-        self.valid_class_numbers = list(self.class_name_to_class_id.values())  # FIXME
+        self.valid_class_numbers = list(self.class_name_to_class_id.values())
 
         # Get sequences to eval and check gt files exist
         if len(self.seq_list) < 1:
@@ -176,12 +182,19 @@ class SoccerNetGS(_BaseDataset):
 
         if is_gt:
             self.categories = {categ['id']: categ for categ in data["categories"]}
-            self.images = data["images"]
-            # Create a dictionary mapping from image_id to timestep
-            self.image_id_to_timestep = {image["image_id"]: int(os.path.splitext(image["file_name"])[0]) - 1 for image in
-                                    data["images"]}
 
-        num_timesteps = len(self.images)  # FIXME what if unlabeled images?
+            # Keep labeled images only
+            images = [img for img in data["images"] if img["has_labeled_pitch"] and img["has_labeled_camera"] and img["has_labeled_person"]]
+
+            # Sort images by frame number
+            def get_frame_number(image):
+                return int(image['image_id'].split('_')[-1])
+            self.images = sorted(images, key=get_frame_number)
+
+            # Create a dictionary mapping from image_id to timestep
+            self.image_id_to_timestep = {image["image_id"]: i for i, image in enumerate(self.images)}
+
+        num_timesteps = len(self.images)
 
         # Initialize lists with None for each timestep
         ids = [None] * num_timesteps
@@ -191,29 +204,16 @@ class SoccerNetGS(_BaseDataset):
         extras = [None] * num_timesteps
         confidences = [None] * num_timesteps
 
-        # # detections = data["annotations"] if is_gt else data["predictions"]
-        # # for annotation in detections:  # FIXME
-        # for annotation in data["annotations"]:  # TODO remove
-        #     if annotation["supercategory"] != "object":  # ignore pitch and camera
-        #         continue
-        #     role = annotation["attributes"]["role"]
-        #     jersey_number = annotation["attributes"]["jersey"]
-        #     team = annotation["attributes"]["team"]
-        #     class_name = attributes_to_class_name(role, team, jersey_number)
-        #     if class_name not in self.all_classes:
-        #         self.all_classes[class_name] = {
-        #             "id": self.class_counter,
-        #             "name": class_name,
-        #             "supercategory": "object"
-        #         }
-        #         self.class_counter += 1
-        # list(self.all_classes.values())
-
         key = "annotations" if is_gt else "predictions"
         for annotation in data[key]:
             if annotation["supercategory"] != "object":  # ignore pitch and camera
                 continue
-            timestep = self.image_id_to_timestep[annotation["image_id"]]
+            image_id = annotation["image_id"]
+            if image_id not in self.image_id_to_timestep:
+                continue
+            if self.ignore_ball and annotation["attributes"]["role"] == "ball":
+                continue
+            timestep = self.image_id_to_timestep[image_id]
             if ids[timestep] is None:
                 ids[timestep] = []
                 classes[timestep] = []
@@ -223,12 +223,22 @@ class SoccerNetGS(_BaseDataset):
                 confidences[timestep] = []
 
             crowd_ignore_regions[timestep].append(np.empty((0, 4)))
-            bbox_image = annotation["bbox_image"]  # FIXME use bbox_pitch and turn into bbox
-            dets[timestep].append([bbox_image["x"], bbox_image["y"], bbox_image["w"], bbox_image["h"]])
+            if self.eval_space == 'pitch':
+                bbox_pitch = annotation["bbox_pitch"]
+                assert bbox_pitch is not None
+                dets[timestep].append([
+                    bbox_pitch["x_bottom_left"], bbox_pitch["y_bottom_left"],
+                    bbox_pitch["x_bottom_middle"], bbox_pitch["y_bottom_middle"],
+                    bbox_pitch["x_bottom_right"], bbox_pitch["y_bottom_right"]
+                ])
+            elif self.eval_space == 'image':
+                bbox_image = annotation["bbox_image"]
+                dets[timestep].append([bbox_image["x"], bbox_image["y"], bbox_image["w"], bbox_image["h"]])
+            else:
+                raise ValueError("Invalid eval_space: " + self.eval_space)
             ids[timestep].append(annotation["track_id"])
 
-            # confidence = annotation["confidence"] if not is_gt else 1
-            confidence = 0.8 if not is_gt else 1  # FIXME
+            confidence = annotation["confidence"] if not is_gt and "confidence" in annotation else 1
             confidences[timestep].append(confidence)
 
             # Extract extra information if needed (modify this part based on your requirements)
@@ -281,7 +291,6 @@ class SoccerNetGS(_BaseDataset):
                 "tracker_extras": extras,
                 "tracker_confidences": [np.array(x) for x in confidences],
             }
-            # raw_data = add_noise_to_data(raw_data, len(self.images))
         return raw_data
 
     @_timing.time
@@ -309,13 +318,8 @@ class SoccerNetGS(_BaseDataset):
                 and unique track ids. It also relabels gt and tracker ids to be contiguous and checks that ids are
                 unique within each timestep.
 
-        BDD100K:
-            In BDD100K, the 4 preproc steps are as follow:
-                1) There are eight classes (pedestrian, rider, car, bus, truck, train, motorcycle, bicycle)
-                    which are evaluated separately.
-                2) For BDD100K there is no removal of matched tracker dets.
-                3) Crowd ignore regions are used to remove unmatched detections.
-                4) No removal of gt dets.
+        SoccerNetGameState:
+            TODO
         """
         cls_id = self.class_name_to_class_id[cls]
 
@@ -378,10 +382,6 @@ class SoccerNetGS(_BaseDataset):
 
         return data
 
-    def _calculate_similarities(self, gt_dets_t, tracker_dets_t):
-        similarity_scores = self._calculate_box_ious(gt_dets_t, tracker_dets_t, box_format='xywh')
-        return similarity_scores
-
     @_timing.time
     def get_raw_seq_data(self, tracker, seq):
         """ Loads raw data (tracker and ground-truth) for a single tracker on a single sequence.
@@ -423,14 +423,82 @@ class SoccerNetGS(_BaseDataset):
             if self.eval_mode == 'distance':
                 # Set similarity score to 0 if attributes do not match
                 for i, (gt_extra, tracker_extra) in enumerate(zip(gt_extras_t, tracker_extras_t)):
-                    # if gt_extra['role'] != tracker_extra['role'] or gt_extra['team'] != tracker_extra['team'] or gt_extra['jersey'] != tracker_extra['jersey']:
                     if attributes_to_class_name(gt_extra['role'], gt_extra['team'], gt_extra['jersey']) != attributes_to_class_name(tracker_extra['role'], tracker_extra['team'], tracker_extra['jersey']):
                         ious[i] = 0
 
             similarity_scores.append(ious)
-            # assert not np.any((ious != 1) & (ious != 0))
         raw_data['similarity_scores'] = similarity_scores
+
+        # Calculate the average, min, and max values
+        avg_similarity_score = np.mean(self.all_similarity_scores)
+        min_similarity_score = np.min(self.all_similarity_scores)
+        max_similarity_score = np.max(self.all_similarity_scores)
+        print(f"Similarity scores: avg={avg_similarity_score}, min={min_similarity_score}, max={max_similarity_score}")
+
         return raw_data
+
+    def _calculate_similarities(self, gt_dets_t, tracker_dets_t):
+        if self.eval_space == 'pitch':
+            if self.eval_sim_metric == 'gaussian':
+                similarity_scores = self._calculate_gaussian_similarity(gt_dets_t, tracker_dets_t, self.eval_sigma)
+            elif self.eval_sim_metric == 'iou':
+                gt_dets_t = bbox_image_bottom_projection_to_bbox_pitch(gt_dets_t)
+                tracker_dets_t = bbox_image_bottom_projection_to_bbox_pitch(tracker_dets_t)
+                similarity_scores = self._calculate_box_ious(gt_dets_t, tracker_dets_t, box_format='xywh')
+            elif self.eval_sim_metric == 'eucl':
+                similarity_scores = self._calculate_normalized_euclidean_similarity(gt_dets_t, tracker_dets_t)
+            else:
+                raise ValueError("Invalid eval_sim_metric: " + self.eval_sim_metric)
+        elif self.eval_space == 'image':
+            similarity_scores = self._calculate_box_ious(gt_dets_t, tracker_dets_t, box_format='xywh')
+        else:
+            raise ValueError("Invalid eval_space: " + self.eval_space)
+
+        # Flatten the similarity_scores and add them to the list
+        self.all_similarity_scores.extend(similarity_scores.flatten())
+
+        return similarity_scores
+
+    def _calculate_gaussian_similarity(self, gt_dets_t, tracker_dets_t, sigma=2.5):
+        # Extract the middle points
+        gt_middle_points = gt_dets_t[:, 2:4]  # x_bottom_middle, y_bottom_middle
+        tracker_middle_points = tracker_dets_t[:, 2:4]  # x_bottom_middle, y_bottom_middle
+
+        # Compute the Euclidean distance between the middle points
+        diff = np.expand_dims(gt_middle_points, axis=1) - np.expand_dims(tracker_middle_points, axis=0)
+        distances = np.sqrt(np.sum(diff ** 2, axis=-1))
+
+        # Apply the Gaussian function to the distances
+        similarities = np.exp(-0.5 * (distances / sigma) ** 2)
+
+        return similarities
+
+    def _calculate_normalized_euclidean_similarity(self, gt_dets_t, tracker_dets_t, normalization_factor=1.0, small_value = 1e-10):
+        # gt_dets_t and tracker_dets_t are numpy arrays of shape (N, 6) and (M, 6) respectively
+        # where N and M are the number of points in each set.
+        # Each row in the arrays represents a point (x_bottom_left, y_bottom_left, x_bottom_middle, y_bottom_middle, x_bottom_right, y_bottom_right)
+
+        # Extract the middle points
+        gt_middle_points = gt_dets_t[:, 2:4]  # x_bottom_middle, y_bottom_middle
+        tracker_middle_points = tracker_dets_t[:, 2:4]  # x_bottom_middle, y_bottom_middle
+
+        # Compute the Euclidean distance between the middle points
+        diff = np.expand_dims(gt_middle_points, axis=1) - np.expand_dims(tracker_middle_points, axis=0)
+        euclidean_distance = np.sqrt(np.sum(diff ** 2, axis=-1))
+
+        # Compute the width of the ground truth detections
+        gt_width = gt_dets_t[:, 4] - gt_dets_t[:, 0]  # x_bottom_right - x_bottom_left
+
+        # Replace zeros in gt_width with small_value
+        gt_width = np.where(gt_width == 0, small_value, gt_width)
+
+        # Normalize the Euclidean distance by the width of the ground truth detections
+        normalized_distance = euclidean_distance / (gt_width[:, np.newaxis] * normalization_factor)
+
+        # Clip the final values to the range [0, 1]
+        normalized_distance = 1 - np.clip(normalized_distance, 0, 1)
+
+        return normalized_distance
 
 
 def attributes_to_class_name(role, team, jersey_number):
@@ -449,6 +517,28 @@ def attributes_to_class_name(role, team, jersey_number):
     else:
         category = f"unknown_{role}"
     return category
+
+
+def bbox_image_bottom_projection_to_bbox_pitch(dets):
+    """
+    Convert bounding boxes bottom left/center/right points in pitch space to a pitch bounding box.
+    The pitch bbox is a square centered of the image bbox projected bottom center, with the height and width equal to the distance between the bottom left and bottom right points.
+    """
+    # Extract the middle points
+    x_bottom_middle = dets[:, 2]
+    y_bottom_middle = dets[:, 3]
+
+    # Calculate the width and height of the bounding box
+    x_bottom_left = dets[:, 0]
+    y_bottom_left = dets[:, 1]
+    x_bottom_right = dets[:, 4]
+    y_bottom_right = dets[:, 5]
+    bbox_width_height = np.sqrt((x_bottom_right - x_bottom_left)**2 + (y_bottom_right - y_bottom_left)**2)
+
+    # Create a new array with the calculated values
+    transformed_dets = np.stack((x_bottom_middle, y_bottom_middle, bbox_width_height, bbox_width_height), axis=-1)
+
+    return transformed_dets
 
 
 def extract_all_classes(config, gt_fol, seq_list):
@@ -474,30 +564,3 @@ def extract_all_classes(config, gt_fol, seq_list):
                     "supercategory": "object"
                 }
     return all_classes
-
-
-def add_noise_to_data(raw_data, num_timesteps, proba=0.2):
-    all_classes = np.unique(np.concatenate(raw_data['tracker_classes']))
-
-    for t in range(num_timesteps):
-        # if raw_data['tracker_classes'][t] is not None:
-        #     for i in range(len(raw_data['tracker_classes'][t])):
-        #         if random.random() < proba:
-        #             raw_data['tracker_classes'][t][i] = random.choice(all_classes)
-
-        if raw_data['tracker_dets'][t] is not None:
-            for i in range(len(raw_data['tracker_dets'][t])):
-                shift_x = raw_data['tracker_dets'][t][i][2] * random.uniform(-0.1, 0.1)
-                shift_y = raw_data['tracker_dets'][t][i][3] * random.uniform(-0.1, 0.1)
-                raw_data['tracker_dets'][t][i][0] += shift_x
-                raw_data['tracker_dets'][t][i][1] += shift_y
-
-        if random.random() < proba and len(raw_data['tracker_ids'][t]) > 0:
-            remove_index = random.randint(0, len(raw_data['tracker_ids'][t]) - 1)
-            raw_data['tracker_ids'][t] = np.delete(raw_data['tracker_ids'][t], remove_index)
-            raw_data['tracker_classes'][t] = np.delete(raw_data['tracker_classes'][t], remove_index)
-            raw_data['tracker_dets'][t] = np.delete(raw_data['tracker_dets'][t], remove_index, axis=0)
-            raw_data['tracker_confidences'][t] = np.delete(raw_data['tracker_confidences'][t], remove_index)
-            raw_data['tracker_extras'][t].pop(remove_index)
-
-    return raw_data
