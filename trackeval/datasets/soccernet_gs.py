@@ -23,6 +23,7 @@ class SoccerNetGS(_BaseDataset):
             'EVAL_SPACE': 'pitch',  # Valid: 'image', 'pitch'
             'EVAL_SIMILARITY_METRIC': 'gaussian',  # Valid: 'iou', 'eucl', 'gaussian'
             'EVAL_SIGMA': 2.5,  # Sigma parameter for the gaussian similarity metric.
+            'IGNORE_BALL': True,  # Ignore ball for evaluation, currently ball evaluation is not supported
             'INPUT_AS_ZIP': False,  # Whether tracker input files are zipped
             'PRINT_CONFIG': True,  # Whether to print current config
             'DO_PREPROC': True,  # Whether to perform preprocessing (never done for MOT15)
@@ -54,7 +55,7 @@ class SoccerNetGS(_BaseDataset):
             track_split_fol = ''
         self.gt_fol = os.path.join(self.config['GT_FOLDER'], gt_split_fol)
         self.tracker_fol = os.path.join(self.config['TRACKERS_FOLDER'], track_split_fol)
-        self.seq_list, self.seq_lengths = self._get_seq_info()
+        self.seq_list, self.seq_lengths = self._get_seq_info()  # FIXME seq_lengths useless
         self.eval_mode = self.config['EVAL_MODE']
         self.eval_space = self.config['EVAL_SPACE']
         self.eval_sim_metric = self.config['EVAL_SIMILARITY_METRIC']
@@ -142,12 +143,12 @@ class SoccerNetGS(_BaseDataset):
             seq_lengths = self.config["SEQ_INFO"]
         else:
             if self.config["SEQMAP_FILE"]:
-                seqmap_file = self.config["SEQMAP_FILE"]
+                seqmap_file = self.config["SEQMAP_FILE"][0] if isinstance(self.config["SEQMAP_FILE"], list) else self.config["SEQMAP_FILE"]
             else:
                 if self.config["SEQMAP_FOLDER"] is None:
-                    seqmap_file = os.path.join(self.config['GT_FOLDER'], self.gt_set + '.txt')
+                    seqmap_file = os.path.join(self.config['GT_FOLDER'], self.config['SPLIT_TO_EVAL'], 'seq_info.json')
                 else:
-                    seqmap_file = os.path.join(self.config["SEQMAP_FOLDER"], self.gt_set + '.txt')
+                    seqmap_file = os.path.join(self.config["SEQMAP_FOLDER"], self.config['SPLIT_TO_EVAL'], 'seq_info.json')
 
             if not os.path.isfile(seqmap_file):
                 print('no seqmap found: ' + seqmap_file)
