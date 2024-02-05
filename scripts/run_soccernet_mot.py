@@ -1,8 +1,8 @@
-""" run_mot_challenge.py
+""" run_soccernet_mot.py
 
 Run example:
 
-python tools/evaluate_soccernet_v3_tracking.py \
+python run_soccernet_mot.py \
 --BENCHMARK SNMOT \
 --DO_PREPROC False \
 --SEQMAP_FILE tools/SNMOT-test.txt \
@@ -12,7 +12,7 @@ python tools/evaluate_soccernet_v3_tracking.py \
 --TRACKERS_FOLDER_ZIP soccernet_mot_results.zip \
 --GT_FOLDER_ZIP gt.zip  
 
-run_mot_challenge.py --USE_PARALLEL False --METRICS Hota --TRACKERS_TO_EVAL Lif_T
+run_soccernet_mot.py --USE_PARALLEL False --METRICS Hota --TRACKERS_TO_EVAL Lif_T
 
 Command Line Arguments: Defaults, # Comments
     Eval arguments:
