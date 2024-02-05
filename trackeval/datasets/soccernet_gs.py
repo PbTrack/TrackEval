@@ -43,6 +43,15 @@ class SoccerNetGS(_BaseDataset):
     def __init__(self, config=None):
         """Initialise dataset, checking that all required files are present"""
         super().__init__()
+
+        print("Initializing the dataset class for the SoccerNet Game State Recognition task.\n"
+              "IMPORTANT: The official evaluation metric for the task, i.e. the 'GS-HOTA' will appear under the 'HOTA' name in the evaluation script output.\n"
+              "This happen because GS-HOTA mainly uses the same logic as the HOTA metric, the HOTA evaluation class is therefore not forked but re-used.\n"
+              "The key practical difference between the GS-HOTA and the HOTA is actually the similarity metric used to match predictions with ground truth."
+              "Since this similarity score is computed outside the HOTA class (i.e. inside the SoccerNetGS dataset class), there was no need to fork it into a GS-HOTA class.\n"
+              "Please refer to the official paper for more information."
+              )
+
         # Fill non-given config values with defaults
         self.config = utils.init_config(config, self.get_default_dataset_config(), self.get_name())
 
